@@ -24,6 +24,9 @@
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/TypeSwitch.h"
 
+namespace {
+#include "flang/Optimizer/Transforms/RewritePatterns.inc"
+} // namespace
 using namespace fir;
 
 /// Return true if a sequence type is of some incomplete size or a record type
@@ -497,6 +500,18 @@ static mlir::LogicalResult verify(fir::ArrayUpdateOp op) {
 }
 
 //===----------------------------------------------------------------------===//
+// ArrayModifyOp
+//===----------------------------------------------------------------------===//
+
+static mlir::LogicalResult verify(fir::ArrayModifyOp op) {
+  auto arrTy = op.sequence().getType().cast<fir::SequenceType>();
+  auto indSize = op.indices().size();
+  if (indSize < arrTy.getDimension())
+    return op.emitOpError("number of indices must match array dimension");
+  return mlir::success();
+}
+
+//===----------------------------------------------------------------------===//
 // BoxAddrOp
 //===----------------------------------------------------------------------===//
 
@@ -530,7 +545,7 @@ fir::BoxCharLenOp::fold(llvm::ArrayRef<mlir::Attribute> opnds) {
 /// Get the result types packed in a tuple tuple
 mlir::Type fir::BoxDimsOp::getTupleType() {
   // note: triple, but 4 is nearest power of 2
-  llvm::SmallVector<mlir::Type, 4> triple{
+  llvm::SmallVector<mlir::Type> triple{
       getResult(0).getType(), getResult(1).getType(), getResult(2).getType()};
   return mlir::TupleType::get(getContext(), triple);
 }
@@ -555,14 +570,14 @@ static void printCallOp(mlir::OpAsmPrinter &p, fir::CallOp &op) {
   p << '(' << op->getOperands().drop_front(isDirect ? 0 : 1) << ')';
   p.printOptionalAttrDict(op->getAttrs(), {"callee"});
   auto resultTypes{op.getResultTypes()};
-  llvm::SmallVector<Type, 8> argTypes(
+  llvm::SmallVector<Type> argTypes(
       llvm::drop_begin(op.getOperandTypes(), isDirect ? 0 : 1));
   p << " : " << FunctionType::get(op.getContext(), argTypes, resultTypes);
 }
 
 static mlir::ParseResult parseCallOp(mlir::OpAsmParser &parser,
                                      mlir::OperationState &result) {
-  llvm::SmallVector<mlir::OpAsmParser::OperandType, 8> operands;
+  llvm::SmallVector<mlir::OpAsmParser::OperandType> operands;
   if (parser.parseOperandList(operands))
     return mlir::failure();
 
@@ -611,7 +626,8 @@ void fir::CallOp::build(mlir::OpBuilder &builder, mlir::OperationState &result,
                         llvm::ArrayRef<mlir::Type> results,
                         mlir::ValueRange operands) {
   result.addOperands(operands);
-  result.addAttribute(getCalleeAttrName(), callee);
+  if (callee)
+    result.addAttribute(getCalleeAttrName(), callee);
   result.addTypes(results);
 }
 
@@ -622,12 +638,13 @@ void fir::CallOp::build(mlir::OpBuilder &builder, mlir::OperationState &result,
 template <typename OPTY>
 static void printCmpOp(OpAsmPrinter &p, OPTY op) {
   p << ' ';
-  auto predSym = mlir::symbolizeCmpFPredicate(
+  auto predSym = mlir::arith::symbolizeCmpFPredicate(
       op->template getAttrOfType<mlir::IntegerAttr>(
             OPTY::getPredicateAttrName())
           .getInt());
   assert(predSym.hasValue() && "invalid symbol value for predicate");
-  p << '"' << mlir::stringifyCmpFPredicate(predSym.getValue()) << '"' << ", ";
+  p << '"' << mlir::arith::stringifyCmpFPredicate(predSym.getValue()) << '"'
+    << ", ";
   p.printOperand(op.lhs());
   p << ", ";
   p.printOperand(op.rhs());
@@ -639,7 +656,7 @@ static void printCmpOp(OpAsmPrinter &p, OPTY op) {
 template <typename OPTY>
 static mlir::ParseResult parseCmpOp(mlir::OpAsmParser &parser,
                                     mlir::OperationState &result) {
-  llvm::SmallVector<mlir::OpAsmParser::OperandType, 2> ops;
+  llvm::SmallVector<mlir::OpAsmParser::OperandType> ops;
   mlir::NamedAttrList attrs;
   mlir::Attribute predicateNameAttr;
   mlir::Type type;
@@ -668,11 +685,29 @@ static mlir::ParseResult parseCmpOp(mlir::OpAsmParser &parser,
 }
 
 //===----------------------------------------------------------------------===//
+// CharConvertOp
+//===----------------------------------------------------------------------===//
+
+static mlir::LogicalResult verify(fir::CharConvertOp op) {
+  auto unwrap = [&](mlir::Type t) {
+    t = fir::unwrapSequenceType(fir::dyn_cast_ptrEleTy(t));
+    return t.dyn_cast<fir::CharacterType>();
+  };
+  auto inTy = unwrap(op.from().getType());
+  auto outTy = unwrap(op.to().getType());
+  if (!(inTy && outTy))
+    return op.emitOpError("not a reference to a character");
+  if (inTy.getFKind() == outTy.getFKind())
+    return op.emitOpError("buffers must have different KIND values");
+  return mlir::success();
+}
+
+//===----------------------------------------------------------------------===//
 // CmpcOp
 //===----------------------------------------------------------------------===//
 
 void fir::buildCmpCOp(OpBuilder &builder, OperationState &result,
-                      CmpFPredicate predicate, Value lhs, Value rhs) {
+                      arith::CmpFPredicate predicate, Value lhs, Value rhs) {
   result.addOperands({lhs, rhs});
   result.types.push_back(builder.getI1Type());
   result.addAttribute(
@@ -680,8 +715,9 @@ void fir::buildCmpCOp(OpBuilder &builder, OperationState &result,
       builder.getI64IntegerAttr(static_cast<int64_t>(predicate)));
 }
 
-mlir::CmpFPredicate fir::CmpcOp::getPredicateByName(llvm::StringRef name) {
-  auto pred = mlir::symbolizeCmpFPredicate(name);
+mlir::arith::CmpFPredicate
+fir::CmpcOp::getPredicateByName(llvm::StringRef name) {
+  auto pred = mlir::arith::symbolizeCmpFPredicate(name);
   assert(pred.hasValue() && "invalid predicate name");
   return pred.getValue();
 }
@@ -742,7 +778,11 @@ static mlir::LogicalResult verify(fir::ConstcOp &op) {
 //===----------------------------------------------------------------------===//
 
 void fir::ConvertOp::getCanonicalizationPatterns(
-    OwningRewritePatternList &results, MLIRContext *context) {}
+    OwningRewritePatternList &results, MLIRContext *context) {
+  results.insert<ConvertConvertOptPattern, RedundantConvertOptPattern,
+                 CombineConvertOptPattern, ForwardConstantConvertPattern>(
+      context);
+}
 
 mlir::OpFoldResult fir::ConvertOp::fold(llvm::ArrayRef<mlir::Attribute> opnds) {
   if (value().getType() == getType())
@@ -813,10 +853,10 @@ static mlir::ParseResult parseCoordinateCustom(mlir::OpAsmParser &parser,
   mlir::OpAsmParser::OperandType memref;
   if (parser.parseOperand(memref) || parser.parseComma())
     return mlir::failure();
-  llvm::SmallVector<mlir::OpAsmParser::OperandType, 8> coorOperands;
+  llvm::SmallVector<mlir::OpAsmParser::OperandType> coorOperands;
   if (parser.parseOperandList(coorOperands))
     return mlir::failure();
-  llvm::SmallVector<mlir::OpAsmParser::OperandType, 16> allOperands;
+  llvm::SmallVector<mlir::OpAsmParser::OperandType> allOperands;
   allOperands.push_back(memref);
   allOperands.append(coorOperands.begin(), coorOperands.end());
   mlir::FunctionType funcTy;
@@ -1157,6 +1197,24 @@ static ParseResult parseGlobalOp(OpAsmParser &parser, OperationState &result) {
   return mlir::success();
 }
 
+static void print(mlir::OpAsmPrinter &p, fir::GlobalOp &op) {
+  if (op.linkName().hasValue())
+    p << ' ' << op.linkName().getValue();
+  p << ' ';
+  p.printAttributeWithoutType(
+      op.getOperation()->getAttr(fir::GlobalOp::symbolAttrName()));
+  if (auto val = op.getValueOrNull())
+    p << '(' << val << ')';
+  if (op.getOperation()->getAttr(fir::GlobalOp::getConstantAttrName()))
+    p << " constant";
+  p << " : ";
+  p.printType(op.getType());
+  if (op.hasInitializationBody())
+    p.printRegion(op.getOperation()->getRegion(0),
+                  /*printEntryBlockArgs=*/false,
+                  /*printBlockTerminators=*/true);
+}
+
 void fir::GlobalOp::appendInitialValue(mlir::Operation *op) {
   getBlock().getOperations().push_back(op);
 }
@@ -1220,9 +1278,9 @@ template <bool AllowFields>
 static void appendAsAttribute(llvm::SmallVectorImpl<mlir::Attribute> &attrs,
                               mlir::Value val) {
   if (auto *op = val.getDefiningOp()) {
-    if (auto cop = mlir::dyn_cast<mlir::ConstantOp>(op)) {
+    if (auto cop = mlir::dyn_cast<mlir::arith::ConstantOp>(op)) {
       // append the integer constant value
-      if (auto iattr = cop.getValue().dyn_cast<mlir::IntegerAttr>()) {
+      if (auto iattr = cop.value().dyn_cast<mlir::IntegerAttr>()) {
         attrs.push_back(iattr);
         return;
       }
@@ -1449,8 +1507,8 @@ struct UndoComplexPattern : public mlir::RewritePattern {
 
 void fir::InsertValueOp::getCanonicalizationPatterns(
     mlir::OwningRewritePatternList &results, mlir::MLIRContext *context) {
-  results.insert<UndoComplexPattern<mlir::AddFOp, fir::AddcOp>,
-                 UndoComplexPattern<mlir::SubFOp, fir::SubcOp>>(context);
+  results.insert<UndoComplexPattern<mlir::arith::AddFOp, fir::AddcOp>,
+                 UndoComplexPattern<mlir::arith::SubFOp, fir::SubcOp>>(context);
 }
 
 //===----------------------------------------------------------------------===//
@@ -1830,8 +1888,8 @@ static mlir::ParseResult parseDoLoopOp(mlir::OpAsmParser &parser,
     result.addAttribute("unordered", builder.getUnitAttr());
 
   // Parse the optional initial iteration arguments.
-  llvm::SmallVector<mlir::OpAsmParser::OperandType, 4> regionArgs, operands;
-  llvm::SmallVector<mlir::Type, 4> argTypes;
+  llvm::SmallVector<mlir::OpAsmParser::OperandType> regionArgs, operands;
+  llvm::SmallVector<mlir::Type> argTypes;
   auto prependCount = false;
   regionArgs.push_back(inductionVariable);
 
@@ -2300,16 +2358,16 @@ static mlir::ParseResult parseSelectCase(mlir::OpAsmParser &parser,
   if (parseSelector(parser, result, selector, type))
     return mlir::failure();
 
-  llvm::SmallVector<mlir::Attribute, 8> attrs;
-  llvm::SmallVector<mlir::OpAsmParser::OperandType, 8> opers;
-  llvm::SmallVector<mlir::Block *, 8> dests;
-  llvm::SmallVector<llvm::SmallVector<mlir::Value, 8>, 8> destArgs;
-  llvm::SmallVector<int32_t, 8> argOffs;
+  llvm::SmallVector<mlir::Attribute> attrs;
+  llvm::SmallVector<mlir::OpAsmParser::OperandType> opers;
+  llvm::SmallVector<mlir::Block *> dests;
+  llvm::SmallVector<llvm::SmallVector<mlir::Value>> destArgs;
+  llvm::SmallVector<int32_t> argOffs;
   int32_t offSize = 0;
   while (true) {
     mlir::Attribute attr;
     mlir::Block *dest;
-    llvm::SmallVector<mlir::Value, 8> destArg;
+    llvm::SmallVector<mlir::Value> destArg;
     mlir::NamedAttrList temp;
     if (parser.parseAttribute(attr, "a", temp) || isValidCaseAttr(attr) ||
         parser.parseComma())
@@ -2348,7 +2406,7 @@ static mlir::ParseResult parseSelectCase(mlir::OpAsmParser &parser,
                       parser.getBuilder().getArrayAttr(attrs));
   if (parser.resolveOperands(opers, type, result.operands))
     return mlir::failure();
-  llvm::SmallVector<int32_t, 8> targOffs;
+  llvm::SmallVector<int32_t> targOffs;
   int32_t toffSize = 0;
   const auto count = dests.size();
   for (std::remove_const_t<decltype(count)> i = 0; i != count; ++i) {
@@ -2416,7 +2474,7 @@ void fir::SelectCaseOp::build(mlir::OpBuilder &builder,
                               llvm::ArrayRef<mlir::NamedAttribute> attributes) {
   result.addOperands(selector);
   result.addAttribute(getCasesAttr(), builder.getArrayAttr(compareAttrs));
-  llvm::SmallVector<int32_t, 8> operOffs;
+  llvm::SmallVector<int32_t> operOffs;
   int32_t operSize = 0;
   for (auto attr : compareAttrs) {
     if (attr.isa<fir::ClosedIntervalAttr>()) {
@@ -2437,7 +2495,7 @@ void fir::SelectCaseOp::build(mlir::OpBuilder &builder,
   for (auto d : destinations)
     result.addSuccessors(d);
   const auto opCount = destOperands.size();
-  llvm::SmallVector<int32_t, 8> argOffs;
+  llvm::SmallVector<int32_t> argOffs;
   int32_t sumArgs = 0;
   for (std::remove_const_t<decltype(count)> i = 0; i != count; ++i) {
     if (i < opCount) {
@@ -2467,7 +2525,7 @@ void fir::SelectCaseOp::build(mlir::OpBuilder &builder,
                               llvm::ArrayRef<mlir::Block *> destinations,
                               llvm::ArrayRef<mlir::ValueRange> destOperands,
                               llvm::ArrayRef<mlir::NamedAttribute> attributes) {
-  llvm::SmallVector<mlir::ValueRange, 16> cmpOpers;
+  llvm::SmallVector<mlir::ValueRange> cmpOpers;
   auto iter = cmpOpList.begin();
   for (auto &attr : compareAttrs) {
     if (attr.isa<fir::ClosedIntervalAttr>()) {
@@ -2585,13 +2643,13 @@ static ParseResult parseSelectType(OpAsmParser &parser,
   if (parseSelector(parser, result, selector, type))
     return mlir::failure();
 
-  llvm::SmallVector<mlir::Attribute, 8> attrs;
-  llvm::SmallVector<mlir::Block *, 8> dests;
-  llvm::SmallVector<llvm::SmallVector<mlir::Value, 8>, 8> destArgs;
+  llvm::SmallVector<mlir::Attribute> attrs;
+  llvm::SmallVector<mlir::Block *> dests;
+  llvm::SmallVector<llvm::SmallVector<mlir::Value>> destArgs;
   while (true) {
     mlir::Attribute attr;
     mlir::Block *dest;
-    llvm::SmallVector<mlir::Value, 8> destArg;
+    llvm::SmallVector<mlir::Value> destArg;
     mlir::NamedAttrList temp;
     if (parser.parseAttribute(attr, "a", temp) || parser.parseComma() ||
         parser.parseSuccessorAndUseList(dest, destArg))
@@ -2607,7 +2665,7 @@ static ParseResult parseSelectType(OpAsmParser &parser,
   auto &bld = parser.getBuilder();
   result.addAttribute(fir::SelectTypeOp::getCasesAttr(),
                       bld.getArrayAttr(attrs));
-  llvm::SmallVector<int32_t, 8> argOffs;
+  llvm::SmallVector<int32_t> argOffs;
   int32_t offSize = 0;
   const auto count = dests.size();
   for (std::remove_const_t<decltype(count)> i = 0; i != count; ++i) {
@@ -3183,7 +3241,7 @@ mlir::Type fir::applyPathToType(mlir::Type eleTy, mlir::ValueRange path) {
                   if (auto *op = (*i++).getDefiningOp()) {
                     if (auto off = mlir::dyn_cast<fir::FieldIndexOp>(op))
                       return ty.getType(off.getFieldName());
-                    if (auto off = mlir::dyn_cast<mlir::ConstantOp>(op))
+                    if (auto off = mlir::dyn_cast<mlir::arith::ConstantOp>(op))
                       return ty.getType(fir::toInt(off));
                   }
                   return mlir::Type{};
@@ -3198,7 +3256,7 @@ mlir::Type fir::applyPathToType(mlir::Type eleTy, mlir::ValueRange path) {
                 })
                 .Case<mlir::TupleType>([&](mlir::TupleType ty) {
                   if (auto *op = (*i++).getDefiningOp())
-                    if (auto off = mlir::dyn_cast<mlir::ConstantOp>(op))
+                    if (auto off = mlir::dyn_cast<mlir::arith::ConstantOp>(op))
                       return ty.getType(fir::toInt(off));
                   return mlir::Type{};
                 })

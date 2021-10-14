@@ -109,6 +109,11 @@ static cl::opt<bool>
                          cl::desc("Enables more verbose remarks."), cl::Hidden,
                          cl::init(false));
 
+static cl::opt<unsigned>
+    SetFixpointIterations("openmp-opt-max-iterations", cl::Hidden,
+                          cl::desc("Maximal number of attributor iterations."),
+                          cl::init(256));
+
 STATISTIC(NumOpenMPRuntimeCallsDeduplicated,
           "Number of OpenMP runtime calls deduplicated");
 STATISTIC(NumOpenMPParallelRegionsDeleted,
@@ -1077,8 +1082,8 @@ private:
         Args.clear();
         Args.push_back(OutlinedFn->getArg(0));
         Args.push_back(OutlinedFn->getArg(1));
-        for (unsigned U = CallbackFirstArgOperand, E = CI->getNumArgOperands();
-             U < E; ++U)
+        for (unsigned U = CallbackFirstArgOperand, E = CI->arg_size(); U < E;
+             ++U)
           Args.push_back(CI->getArgOperand(U));
 
         CallInst *NewCI = CallInst::Create(FT, Callee, Args, "", CI);
@@ -1086,8 +1091,8 @@ private:
           NewCI->setDebugLoc(CI->getDebugLoc());
 
         // Forward parameter attributes from the callback to the callee.
-        for (unsigned U = CallbackFirstArgOperand, E = CI->getNumArgOperands();
-             U < E; ++U)
+        for (unsigned U = CallbackFirstArgOperand, E = CI->arg_size(); U < E;
+             ++U)
           for (const Attribute &A : CI->getAttributes().getParamAttrs(U))
             NewCI->addParamAttr(
                 U - (CallbackFirstArgOperand - CallbackCalleeOperand), A);
@@ -1608,7 +1613,7 @@ private:
 
     // TODO: Use dominance to find a good position instead.
     auto CanBeMoved = [this](CallBase &CB) {
-      unsigned NumArgs = CB.getNumArgOperands();
+      unsigned NumArgs = CB.arg_size();
       if (NumArgs == 0)
         return true;
       if (CB.getArgOperand(0)->getType() != OMPInfoCache.OMPBuilder.IdentPtr)
@@ -3348,8 +3353,9 @@ struct AAKernelInfoFunction : AAKernelInfo {
     if (DisableOpenMPOptStateMachineRewrite)
       return ChangeStatus::UNCHANGED;
 
-    assert(ReachedKnownParallelRegions.isValidState() &&
-           "Custom state machine with invalid parallel region states?");
+    // Don't rewrite the state machine if we are not in a valid state.
+    if (!ReachedKnownParallelRegions.isValidState())
+      return ChangeStatus::UNCHANGED;
 
     const int InitModeArgNo = 1;
     const int InitUseStateMachineArgNo = 2;
@@ -4583,7 +4589,8 @@ PreservedAnalyses OpenMPOptPass::run(Module &M, ModuleAnalysisManager &AM) {
   SetVector<Function *> Functions(SCC.begin(), SCC.end());
   OMPInformationCache InfoCache(M, AG, Allocator, /*CGSCC*/ Functions, Kernels);
 
-  unsigned MaxFixpointIterations = (isOpenMPDevice(M)) ? 128 : 32;
+  unsigned MaxFixpointIterations =
+      (isOpenMPDevice(M)) ? SetFixpointIterations : 32;
   Attributor A(Functions, InfoCache, CGUpdater, nullptr, true, false,
                MaxFixpointIterations, OREGetter, DEBUG_TYPE);
 
@@ -4646,7 +4653,8 @@ PreservedAnalyses OpenMPOptCGSCCPass::run(LazyCallGraph::SCC &C,
   OMPInformationCache InfoCache(*(Functions.back()->getParent()), AG, Allocator,
                                 /*CGSCC*/ Functions, Kernels);
 
-  unsigned MaxFixpointIterations = (isOpenMPDevice(M)) ? 128 : 32;
+  unsigned MaxFixpointIterations =
+      (isOpenMPDevice(M)) ? SetFixpointIterations : 32;
   Attributor A(Functions, InfoCache, CGUpdater, nullptr, false, true,
                MaxFixpointIterations, OREGetter, DEBUG_TYPE);
 
@@ -4716,7 +4724,8 @@ struct OpenMPOptCGSCCLegacyPass : public CallGraphSCCPass {
                                   Allocator,
                                   /*CGSCC*/ Functions, Kernels);
 
-    unsigned MaxFixpointIterations = (isOpenMPDevice(M)) ? 128 : 32;
+    unsigned MaxFixpointIterations =
+        (isOpenMPDevice(M)) ? SetFixpointIterations : 32;
     Attributor A(Functions, InfoCache, CGUpdater, nullptr, false, true,
                  MaxFixpointIterations, OREGetter, DEBUG_TYPE);
 

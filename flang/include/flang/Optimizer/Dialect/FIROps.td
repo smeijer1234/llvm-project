@@ -294,6 +294,46 @@ def fir_LoadOp : fir_OneResultOp<"load"> {
   }];
 }
 
+def fir_CharConvertOp : fir_Op<"char_convert", []> {
+  let summary = [{
+    Primitive to convert an entity of type CHARACTER from one KIND to a
+    different KIND.
+  }];
+
+  let description = [{
+    Copy a CHARACTER (must be in memory) of KIND _k1_ to a CHARACTER (also must
+    be in memory) of KIND _k2_ where _k1_ != _k2_ and the buffers do not
+    overlap. This latter restriction is unchecked, as the Fortran language
+    definition eliminates the overlapping in memory case.
+
+    The number of code points copied is specified explicitly as the second
+    argument. The length of the !fir.char type is ignored.
+
+    ```mlir
+      fir.char_convert %1 for %2 to %3 : !fir.ref<!fir.char<1,?>>, i32,
+          !fir.ref<!fir.char<2,20>>
+    ```
+
+    Should future support for encodings other than ASCII be supported, codegen
+    can generate a call to a runtime helper routine which will map the code
+    points from UTF-8 to UCS-2, for example. Such remappings may not always
+    be possible as they may involve the creation of more code points than the
+    `count` limit. These details are left as future to-dos.
+  }];
+
+  let arguments = (ins
+    Arg<AnyReferenceLike, "", [MemRead]>:$from,
+    AnyIntegerType:$count,
+    Arg<AnyReferenceLike, "", [MemWrite]>:$to
+  );
+
+  let assemblyFormat = [{
+    $from `for` $count `to` $to attr-dict `:` type(operands)
+  }];
+
+  let verifier = "return ::verify(*this);";
+}
+
 def fir_StoreOp : fir_Op<"store", []> {
   let summary = "store an SSA-value to a memory location";
 
@@ -489,7 +529,7 @@ class fir_IntegralSwitchTerminatorOp<string mnemonic,
     CArg<"llvm::ArrayRef<mlir::NamedAttribute>", "{}">:$attributes),
     [{
       $_state.addOperands(selector);
-      llvm::SmallVector<mlir::Attribute, 8> ivalues;
+      llvm::SmallVector<mlir::Attribute> ivalues;
       for (auto iv : compareOperands)
         ivalues.push_back($_builder.getI64IntegerAttr(iv));
       ivalues.push_back($_builder.getUnitAttr());
@@ -498,7 +538,7 @@ class fir_IntegralSwitchTerminatorOp<string mnemonic,
       for (auto d : destinations)
         $_state.addSuccessors(d);
       const auto opCount = destOperands.size();
-      llvm::SmallVector<int32_t, 8> argOffs;
+      llvm::SmallVector<int32_t> argOffs;
       int32_t sumArgs = 0;
       for (std::remove_const_t<decltype(count)> i = 0; i != count; ++i) {
         if (i < opCount) {
@@ -524,13 +564,13 @@ class fir_IntegralSwitchTerminatorOp<string mnemonic,
     if (parseSelector(parser, result, selector, type))
       return mlir::failure();
 
-    llvm::SmallVector<mlir::Attribute, 8> ivalues;
-    llvm::SmallVector<mlir::Block *, 8> dests;
-    llvm::SmallVector<llvm::SmallVector<mlir::Value, 8>, 8> destArgs;
+    llvm::SmallVector<mlir::Attribute> ivalues;
+    llvm::SmallVector<mlir::Block *> dests;
+    llvm::SmallVector<llvm::SmallVector<mlir::Value>> destArgs;
     while (true) {
       mlir::Attribute ivalue; // Integer or Unit
       mlir::Block *dest;
-      llvm::SmallVector<mlir::Value, 8> destArg;
+      llvm::SmallVector<mlir::Value> destArg;
       mlir::NamedAttrList temp;
       if (parser.parseAttribute(ivalue, "i", temp) ||
           parser.parseComma() ||
@@ -546,7 +586,7 @@ class fir_IntegralSwitchTerminatorOp<string mnemonic,
     }
     auto &bld = parser.getBuilder();
     result.addAttribute(getCasesAttr(), bld.getArrayAttr(ivalues));
-    llvm::SmallVector<int32_t, 8> argOffs;
+    llvm::SmallVector<int32_t> argOffs;
     int32_t sumArgs = 0;
     const auto count = dests.size();
     for (std::remove_const_t<decltype(count)> i = 0; i != count; ++i) {
@@ -1442,6 +1482,67 @@ def fir_ArrayUpdateOp : fir_Op<"array_update", [AttrSizedOperandSegments,
   }];
 
   let verifier = "return ::verify(*this);";
+}
+
+def fir_ArrayModifyOp : fir_Op<"array_modify", [AttrSizedOperandSegments,
+    NoSideEffect]> {
+  let summary = "Get an address for an array value to modify it.";
+
+  let description = [{
+    Modify the value of an element in an array value through actions done
+    on the returned address. A new array value is also
+    returned where all element values of the input array are identical except
+    for the selected element which is the value after the modification done
+    on the element address.
+
+    ```fortran
+      real :: a(n)
+      ...
+      ! Elemental user defined assignment from type(SomeType) to real.
+      a = value_of_some_type
+    ```
+
+    One can use `fir.array_modify` to update the (implied) value of `a(i)`
+    in an array expression as shown above.
+
+    ```mlir
+      %s = fir.shape %n : (index) -> !fir.shape<1>
+      // Load the entire array 'a'.
+      %v = fir.array_load %a(%s) : (!fir.ref<!fir.array<?xf32>>, !fir.shape<1>)
+          -> !fir.array<?xf32>
+      // Update the value of one of the array value's elements with a user
+      // defined assignment from %rhs.
+      %new = fir.do_loop %i = ... (%inner = %v) {
+        %rhs = ...
+        %addr, %r = fir.array_modify %inner, %i, %j : (!fir.array<?xf32>,
+	    index) -> fir.ref<f32>, !fir.array<?xf32>
+        fir.call @user_def_assign(%addr, %rhs) (fir.ref<f32>,
+	    fir.ref<!fir.type<SomeType>>) -> ()
+        fir.result %r : !fir.ref<!fir.array<?xf32>>
+      }
+      fir.array_merge_store %v, %new to %a : !fir.ref<!fir.array<?xf32>>
+    ```
+
+    An array value modification behaves as if a mapping function from the indices
+    to the new value has been added, replacing the previous mapping. These
+    mappings can be added to the ssa-value, but will not be materialized in
+    memory until the `fir.array_merge_store` is performed.
+  }];
+
+  let arguments = (ins
+    fir_SequenceType:$sequence,
+    Variadic<AnyCoordinateType>:$indices,
+    Variadic<AnyIntegerType>:$typeparams
+  );
+
+  let results = (outs fir_ReferenceType, fir_SequenceType);
+
+  let assemblyFormat = [{
+    $sequence `,` $indices (`typeparams` $typeparams^)? attr-dict
+      `:` functional-type(operands, results)
+  }];
+
+  let verifier = [{ return ::verify(*this); }];
 }
 
 def fir_ArrayMergeStoreOp : fir_Op<"array_merge_store",
@@ -2385,18 +2486,6 @@ class fir_UnaryArithmeticOp<string mnemonic, list<OpTrait> traits = []> :
   let printer = [{ return printUnaryOp(this->getOperation(), p); }];
 }
 
-class RealUnaryArithmeticOp<string mnemonic, list<OpTrait> traits = []> :
-      fir_UnaryArithmeticOp<mnemonic, traits>,
-      Arguments<(ins AnyRealLike:$operand)>;
-
-def fir_NegfOp : RealUnaryArithmeticOp<"negf">;
-
-class RealArithmeticOp<string mnemonic, list<OpTrait> traits = []> :
-      fir_ArithmeticOp<mnemonic, traits>,
-      Arguments<(ins AnyRealLike:$lhs, AnyRealLike:$rhs)>;
-
-def fir_ModfOp : RealArithmeticOp<"modf">;
-
 def fir_ConstcOp : fir_Op<"constc", [NoSideEffect]> {
   let summary = "create a complex constant";
 
@@ -2455,7 +2544,7 @@ def fir_CmpcOp : fir_Op<"cmpc",
 
   let printer = "printCmpcOp(p, *this);";
 
-  let builders = [OpBuilder<(ins "mlir::CmpFPredicate":$predicate,
+  let builders = [OpBuilder<(ins "mlir::arith::CmpFPredicate":$predicate,
     "mlir::Value":$lhs, "mlir::Value":$rhs), [{
       buildCmpCOp($_builder, $_state, predicate, lhs, rhs);
   }]>];
@@ -2465,12 +2554,12 @@ def fir_CmpcOp : fir_Op<"cmpc",
       return "predicate";
     }
 
-    CmpFPredicate getPredicate() {
-      return (CmpFPredicate)(*this)->getAttrOfType<mlir::IntegerAttr>(
+    arith::CmpFPredicate getPredicate() {
+      return (arith::CmpFPredicate)(*this)->getAttrOfType<mlir::IntegerAttr>(
           getPredicateAttrName()).getInt();
     }
 
-    static CmpFPredicate getPredicateByName(llvm::StringRef name);
+    static arith::CmpFPredicate getPredicateByName(llvm::StringRef name);
   }];
 }
 
@@ -2587,9 +2676,9 @@ def fir_NoReassocOp : fir_OneResultOp<"no_reassoc",
     operations with a single FMA operation.
 
     ```mlir
-      %98 = mulf %96, %97 : f32
+      %98 = arith.mulf %96, %97 : f32
       %99 = fir.no_reassoc %98 : f32
-      %a0 = addf %99, %95 : f32
+      %a0 = arith.addf %99, %95 : f32
     ```
   }];
 
@@ -2638,21 +2727,7 @@ def fir_GlobalOp : fir_Op<"global", [IsolatedFromAbove, Symbol]> {
 
   let parser = "return parseGlobalOp(parser, result);";
 
-  let printer = [{
-    if (linkName().hasValue())
-      p << ' ' << linkName().getValue();
-    p << ' ';
-    p.printAttributeWithoutType((*this)->getAttr(symbolAttrName()));
-    if (auto val = getValueOrNull())
-      p << '(' << val << ')';
-    if (constantAttr())
-      p << " constant";
-    p << " : ";
-    p.printType(getType());
-    if (hasInitializationBody())
-      p.printRegion((*this)->getRegion(0), /*printEntryBlockArgs=*/false,
-                    /*printBlockTerminators=*/true);
-  }];
+  let printer = "::print(p, *this);";
 
   let skipDefaultBuilders = 1;
   let builders = [
@@ -2678,6 +2753,9 @@ def fir_GlobalOp : fir_Op<"global", [IsolatedFromAbove, Symbol]> {
 
   let extraClassDeclaration = [{
     static constexpr llvm::StringRef symbolAttrName() { return "symref"; }
+    static constexpr llvm::StringRef getConstantAttrName() {
+      return "constant";
+    }
     static constexpr llvm::StringRef linkageAttrName() { return "linkName"; }
 
     /// The printable type of the global

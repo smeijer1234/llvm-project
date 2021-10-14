@@ -322,16 +322,24 @@ std::string PerfReaderBase::convertPerfDataToTrace(ProfiledBinary *Binary,
   // Collect the PIDs
   TraceStream TraceIt(PerfTraceFile);
   std::string PIDs;
+  std::unordered_set<uint32_t> PIDSet;
   while (!TraceIt.isAtEoF()) {
     MMapEvent MMap;
     if (isMMap2Event(TraceIt.getCurrentLine()) &&
         extractMMap2EventForBinary(Binary, TraceIt.getCurrentLine(), MMap)) {
-      if (!PIDs.empty()) {
-        PIDs.append(",");
+      auto It = PIDSet.emplace(MMap.PID);
+      if (It.second) {
+        if (!PIDs.empty()) {
+          PIDs.append(",");
+        }
+        PIDs.append(utostr(MMap.PID));
       }
-      PIDs.append(utostr(MMap.PID));
     }
     TraceIt.advance();
+  }
+
+  if (PIDs.empty()) {
+    exitWithError("No relevant mmap event is found in perf data.");
   }
 
   // Run perf script again to retrieve events for PIDs collected above
@@ -484,13 +492,13 @@ bool PerfReaderBase::extractLBRStack(TraceStream &TraceIt,
     if (IsExternal) {
       if (PrevTrDst)
         continue;
-      else if (!LBRStack.empty()) {
+      if (!LBRStack.empty()) {
         WithColor::warning()
             << "Invalid transfer to external code in LBR record at line "
             << TraceIt.getLineNumber() << ": " << TraceIt.getCurrentLine()
             << "\n";
-        break;
       }
+      break;
     }
 
     if (IsOutgoing) {
@@ -639,9 +647,13 @@ void HybridPerfReader::parseSample(TraceStream &TraceIt, uint64_t Count) {
   if (!TraceIt.isAtEoF() && TraceIt.getCurrentLine().startswith(" 0x")) {
     // Parsing LBR stack and populate into PerfSample.LBRStack
     if (extractLBRStack(TraceIt, Sample->LBRStack)) {
-      // Canonicalize stack leaf to avoid 'random' IP from leaf frame skew LBR
-      // ranges
-      Sample->CallStack.front() = Sample->LBRStack[0].Target;
+      if (IgnoreStackSamples) {
+        Sample->CallStack.clear();
+      } else {
+        // Canonicalize stack leaf to avoid 'random' IP from leaf frame skew LBR
+        // ranges
+        Sample->CallStack.front() = Sample->LBRStack[0].Target;
+      }
       // Record samples by aggregation
       AggregatedSamples[Hashable<PerfSample>(Sample)] += Count;
     }

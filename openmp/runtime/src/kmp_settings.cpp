@@ -302,8 +302,8 @@ void __kmp_check_stksize(size_t *val) {
   // if system stack size is too big then limit the size for worker threads
   if (*val > KMP_DEFAULT_STKSIZE * 16) // just a heuristics...
     *val = KMP_DEFAULT_STKSIZE * 16;
-  if (*val < KMP_MIN_STKSIZE)
-    *val = KMP_MIN_STKSIZE;
+  if (*val < __kmp_sys_min_stksize)
+    *val = __kmp_sys_min_stksize;
   if (*val > KMP_MAX_STKSIZE)
     *val = KMP_MAX_STKSIZE; // dead code currently, but may work in future
 #if KMP_OS_DARWIN
@@ -4467,7 +4467,7 @@ static void __kmp_stg_parse_lock_kind(char const *name, char const *value,
   }
 #if KMP_USE_ADAPTIVE_LOCKS
   else if (__kmp_str_match("adaptive", 1, value)) {
-    if (__kmp_cpuinfo.rtm) { // ??? Is cpuinfo available here?
+    if (__kmp_cpuinfo.flags.rtm) { // ??? Is cpuinfo available here?
       __kmp_user_lock_kind = lk_adaptive;
       KMP_STORE_LOCK_SEQ(adaptive);
     } else {
@@ -4479,7 +4479,7 @@ static void __kmp_stg_parse_lock_kind(char const *name, char const *value,
 #endif // KMP_USE_ADAPTIVE_LOCKS
 #if KMP_USE_DYNAMIC_LOCK && KMP_USE_TSX
   else if (__kmp_str_match("rtm_queuing", 1, value)) {
-    if (__kmp_cpuinfo.rtm) {
+    if (__kmp_cpuinfo.flags.rtm) {
       __kmp_user_lock_kind = lk_rtm_queuing;
       KMP_STORE_LOCK_SEQ(rtm_queuing);
     } else {
@@ -4488,7 +4488,7 @@ static void __kmp_stg_parse_lock_kind(char const *name, char const *value,
       KMP_STORE_LOCK_SEQ(queuing);
     }
   } else if (__kmp_str_match("rtm_spin", 1, value)) {
-    if (__kmp_cpuinfo.rtm) {
+    if (__kmp_cpuinfo.flags.rtm) {
       __kmp_user_lock_kind = lk_rtm_spin;
       KMP_STORE_LOCK_SEQ(rtm_spin);
     } else {

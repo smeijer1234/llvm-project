@@ -1647,7 +1647,7 @@ Value *ScalarExprEmitter::VisitShuffleVectorExpr(ShuffleVectorExpr *E) {
   for (unsigned i = 2; i < E->getNumSubExprs(); ++i) {
     llvm::APSInt Idx = E->getShuffleMaskIdx(CGF.getContext(), i-2);
     // Check for -1 and output it as undef in the IR.
-    if (Idx.isSigned() && Idx.isAllOnesValue())
+    if (Idx.isSigned() && Idx.isAllOnes())
       Indices.push_back(-1);
     else
       Indices.push_back(Idx.getZExtValue());
@@ -2154,9 +2154,21 @@ Value *ScalarExprEmitter::VisitCastExpr(CastExpr *CE) {
   }
   case CK_AtomicToNonAtomic:
   case CK_NonAtomicToAtomic:
-  case CK_NoOp:
   case CK_UserDefinedConversion:
     return Visit(const_cast<Expr*>(E));
+
+  case CK_NoOp: {
+    llvm::Value *V = Visit(const_cast<Expr *>(E));
+    if (V) {
+      // CK_NoOp can model a pointer qualification conversion, which can remove
+      // an array bound and change the IR type.
+      // FIXME: Once pointee types are removed from IR, remove this.
+      llvm::Type *T = ConvertType(DestTy);
+      if (T != V->getType())
+        V = Builder.CreateBitCast(V, T);
+    }
+    return V;
+  }
 
   case CK_BaseToDerived: {
     const CXXRecordDecl *DerivedClassDecl = DestTy->getPointeeCXXRecordDecl();

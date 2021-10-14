@@ -56,10 +56,9 @@ public:
   /// `alias`. Additionally, merge their equivalence classes.
   void insertNewBufferEquivalence(Value newValue, Value alias);
 
-  /// Return true if the buffer to which `operand` would bufferize aliases a
-  /// buffer that is known to not be writeable. This implies that the matching
-  /// OpResult cannot be bufferized inplace.
-  bool aliasesNonWriteableBuffer(OpOperand &operand) const;
+  /// Return true if, under current bufferization decisions, the buffer of
+  /// `value` is not writable.
+  bool aliasesNonWritableBuffer(Value value) const;
 
   /// Return true if the buffer to which `operand` would bufferize is equivalent
   /// to some buffer write.
@@ -67,8 +66,7 @@ public:
 
   /// Set the inPlace bufferization spec to true.
   /// Merge result's and operand's aliasing sets and iterate to a fixed point.
-  void bufferizeInPlace(OpResult result, OpOperand &operand,
-                        BufferRelation bufferRelation = BufferRelation::None);
+  void bufferizeInPlace(OpResult result, OpOperand &operand);
 
   /// Set the inPlace bufferization spec to false.
   void bufferizeOutOfPlace(OpResult result);
@@ -85,6 +83,11 @@ public:
   bool wouldCreateReadAfterWriteInterference(
       Operation *opToBufferize, DenseSet<OpOperand *> &usesRead,
       DenseSet<OpOperand *> &usesWrite, const DominanceInfo &domInfo) const;
+
+  /// Return true if bufferizing `opOperand` inplace with `opResult` would
+  /// create a write to a non-writable buffer.
+  bool wouldCreateWriteToNonWritableBuffer(OpOperand &opOperand,
+                                           OpResult opResult) const;
 
   /// Assume that result bufferizes in-place with one of the operation's
   /// operands. Return true if it is possible to find an inplace write W (resp.
@@ -107,7 +110,7 @@ public:
   ///  read(%0)
   /// ```
   bool
-  wouldCreateReadAfterWriteInterference(OpResult result,
+  wouldCreateReadAfterWriteInterference(OpOperand &operand, OpResult result,
                                         const DominanceInfo &domInfo) const;
 
   /// Return true if `v1` and `v2` bufferize to equivalent buffers.
@@ -123,6 +126,12 @@ public:
 
   /// Apply `fun` to all the members of the equivalence class of `v`.
   void applyOnEquivalenceClass(Value v, function_ref<void(Value)> fun) const;
+
+  /// Return true if the value is known to bufferize to writable memory.
+  bool bufferizesToWritableMemory(Value v) const;
+
+  /// Specify that the value is known to bufferize to writable memory.
+  void setBufferizesToWritableMemory(Value v);
 
   /// Print to `os`.
   void printAliases(raw_ostream &os) const;
@@ -210,6 +219,9 @@ private:
                                   OpOperand &aliasingWrite,
                                   const DominanceInfo &domInfo) const;
 
+  /// Set of tensors that are known to bufferize to writable memory.
+  llvm::DenseSet<Value> bufferizeToWritableMemory;
+
   /// Auxiliary structure to store all the values a given value aliases with.
   /// These are the conservative cases that can further decompose into
   /// "equivalent" buffer relationships.
@@ -219,7 +231,7 @@ private:
   llvm::EquivalenceClasses<ValueWrapper> equivalentInfo;
 };
 
-/// Analyze the `ops` to determine which OpResults are inplaceable:
+/// Analyze the `ops` to determine which OpResults are inplaceable.
 LogicalResult inPlaceAnalysis(SmallVector<Operation *> &ops,
                               BufferizationAliasInfo &aliasInfo,
                               const DominanceInfo &domInfo);
