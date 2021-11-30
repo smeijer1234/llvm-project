@@ -978,6 +978,7 @@ void PassBuilder::addVectorPasses(OptimizationLevel Level,
   }
   // Cleanup after the loop optimization passes.
   FPM.addPass(InstCombinePass());
+  FPM.addPass(EarlyCSEPass());
 
   if (Level.getSpeedupLevel() > 1 && ExtraVectorizerPasses) {
     // At higher optimization levels, try to clean up any runtime overlap and
@@ -986,7 +987,6 @@ void PassBuilder::addVectorPasses(OptimizationLevel Level,
     // common computations, hoist loop-invariant aspects out of any outer loop,
     // and unswitch the runtime checks if possible. Once hoisted, we may have
     // dead (or speculatable) control flows or more combining opportunities.
-    FPM.addPass(EarlyCSEPass());
     FPM.addPass(CorrelatedValuePropagationPass());
     FPM.addPass(InstCombinePass());
     LoopPassManager LPM;
